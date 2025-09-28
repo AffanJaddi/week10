@@ -10,17 +10,19 @@ env:
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
   PROD_NAMESPACE: prod
   AKS_RESOURCE_GROUP: ${{ secrets.AKS_RESOURCE_GROUP }}
-  AKS_CLUSTER_NAME:  ${{ secrets.AKS_CLUSTER_NAME }}
+  AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
 
 jobs:
   test_build_push:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # Backend quick safety tests
-      - uses: actions/setup-java@v4
+      # ---- Backend sanity tests (no frontend npm; it's static nginx) ----
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
@@ -37,6 +39,7 @@ jobs:
         working-directory: backend/customer-service
         run: ./mvnw -B -DskipTests=false test
 
+      # ---- Azure/ACR auth ----
       - name: Azure login
         uses: azure/login@v2
         with:
@@ -45,6 +48,7 @@ jobs:
       - name: ACR login
         run: az acr login --name $ACR_NAME
 
+      # ---- Build & push images (prod) ----
       - name: Build & Push product (prod)
         uses: docker/build-push-action@v6
         with:
@@ -72,7 +76,7 @@ jobs:
             ${{ env.ACR_LOGIN_SERVER }}/customer:${{ github.sha }}
             ${{ env.ACR_LOGIN_SERVER }}/customer:prod-${{ github.sha }}
 
-      # Frontend is static Nginx now: build and push as-is (no npm)
+      # Frontend is static (nginx) – no Node build
       - name: Build & Push frontend (prod, static)
         uses: docker/build-push-action@v6
         with:
@@ -88,7 +92,8 @@ jobs:
     environment: production
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Azure login
         uses: azure/login@v2
@@ -99,20 +104,21 @@ jobs:
         uses: azure/aks-set-context@v4
         with:
           resource-group: ${{ env.AKS_RESOURCE_GROUP }}
-          cluster-name:  ${{ env.AKS_CLUSTER_NAME }}
+          cluster-name: ${{ env.AKS_CLUSTER_NAME }}
 
-      - name: Ensure prod namespace
+      - name: Ensure prod namespace exists
         run: kubectl create namespace ${{ env.PROD_NAMESPACE }} || true
 
-      - name: Render prod manifests
+      - name: Render manifests (inject image tags & namespace)
         env:
           NAMESPACE: ${{ env.PROD_NAMESPACE }}
           ACR_LOGIN_SERVER: ${{ env.ACR_LOGIN_SERVER }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           bash .github/scripts/render_manifests.sh k8s/base rendered
+          echo "Rendered files:" && ls -la rendered
 
-      - name: Deploy to prod
+      - name: Deploy to production
         run: |
           kubectl apply -f rendered/
           kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/product  --timeout=180s
@@ -121,4 +127,4 @@ jobs:
           kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/frontend --timeout=180s
 
       - name: Post-deploy check
-        run: kubectl -n ${{ env.PROD_NAMESPACE }} get svc -o wide
+        run: kubectl -n ${{ env.PROD_NAMESPACE }} get all,ingress,svc -o wide
