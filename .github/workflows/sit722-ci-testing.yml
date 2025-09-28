@@ -17,24 +17,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # === Tests (adjust to your stack) ===
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with: { node-version: "20" }
-      - name: Frontend tests
-        working-directory: frontend
-        run: |
-          npm ci
-          npm test -- --ci
-
+      # === Backend tests (Java) ===
       - name: Setup Java
         uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "21" }
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Product tests
         working-directory: backend/product-service
         run: ./mvnw -B -DskipTests=false test
+
       - name: Order tests
         working-directory: backend/order-service
+        run: ./mvnw -B -DskipTests=false test
+
+      - name: Customer tests
+        working-directory: backend/customer-service
         run: ./mvnw -B -DskipTests=false test
 
       # === Azure login (Service Principal JSON) ===
@@ -46,7 +45,7 @@ jobs:
       - name: ACR login
         run: az acr login --name $ACR_NAME
 
-      # === Build & Push (only runs if tests passed) ===
+      # === Build & Push images (only runs if tests passed) ===
       - name: Build & Push product
         uses: docker/build-push-action@v6
         with:
@@ -65,7 +64,17 @@ jobs:
             ${{ env.ACR_LOGIN_SERVER }}/order:${{ github.sha }}
             ${{ env.ACR_LOGIN_SERVER }}/order:testing-${{ github.sha }}
 
-      - name: Build & Push frontend
+      - name: Build & Push customer
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/customer-service
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/customer:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/customer:testing-${{ github.sha }}
+
+      # Frontend is static Nginx now: just build the image (no npm)
+      - name: Build & Push frontend (static)
         uses: docker/build-push-action@v6
         with:
           context: ./frontend

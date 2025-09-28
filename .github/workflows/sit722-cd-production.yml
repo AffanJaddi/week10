@@ -19,22 +19,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Quick safety tests
-      - uses: actions/setup-node@v4
-        with: { node-version: "20" }
-      - name: Frontend tests
-        working-directory: frontend
-        run: |
-          npm install
-          npm test -- --ci
-
+      # Backend quick safety tests
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: "21" }
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Product tests
         working-directory: backend/product-service
         run: ./mvnw -B -DskipTests=false test
+
       - name: Order tests
         working-directory: backend/order-service
+        run: ./mvnw -B -DskipTests=false test
+
+      - name: Customer tests
+        working-directory: backend/customer-service
         run: ./mvnw -B -DskipTests=false test
 
       - name: Azure login
@@ -63,7 +63,17 @@ jobs:
             ${{ env.ACR_LOGIN_SERVER }}/order:${{ github.sha }}
             ${{ env.ACR_LOGIN_SERVER }}/order:prod-${{ github.sha }}
 
-      - name: Build & Push frontend (prod)
+      - name: Build & Push customer (prod)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/customer-service
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/customer:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/customer:prod-${{ github.sha }}
+
+      # Frontend is static Nginx now: build and push as-is (no npm)
+      - name: Build & Push frontend (prod, static)
         uses: docker/build-push-action@v6
         with:
           context: ./frontend
@@ -105,8 +115,9 @@ jobs:
       - name: Deploy to prod
         run: |
           kubectl apply -f rendered/
-          kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/product --timeout=180s
-          kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/order   --timeout=180s
+          kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/product  --timeout=180s
+          kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/order    --timeout=180s
+          kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/customer --timeout=180s
           kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/frontend --timeout=180s
 
       - name: Post-deploy check
