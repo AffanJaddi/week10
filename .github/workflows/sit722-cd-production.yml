@@ -1,0 +1,113 @@
+name: SIT722 CD - Production (main)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  PROD_NAMESPACE: prod
+  AKS_RESOURCE_GROUP: ${{ secrets.AKS_RESOURCE_GROUP }}
+  AKS_CLUSTER_NAME:  ${{ secrets.AKS_CLUSTER_NAME }}
+
+jobs:
+  test_build_push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Quick safety tests
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Frontend tests
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test -- --ci
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - name: Product tests
+        working-directory: backend/product-service
+        run: ./mvnw -B -DskipTests=false test
+      - name: Order tests
+        working-directory: backend/order-service
+        run: ./mvnw -B -DskipTests=false test
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: ACR login
+        run: az acr login --name $ACR_NAME
+
+      - name: Build & Push product (prod)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/product-service
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/product:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/product:prod-${{ github.sha }}
+
+      - name: Build & Push order (prod)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/order-service
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/order:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/order:prod-${{ github.sha }}
+
+      - name: Build & Push frontend (prod)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/frontend:prod-${{ github.sha }}
+
+  deploy_prod:
+    needs: test_build_push
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ env.AKS_RESOURCE_GROUP }}
+          cluster-name:  ${{ env.AKS_CLUSTER_NAME }}
+
+      - name: Ensure prod namespace
+        run: kubectl create namespace ${{ env.PROD_NAMESPACE }} || true
+
+      - name: Render prod manifests
+        env:
+          NAMESPACE: ${{ env.PROD_NAMESPACE }}
+          ACR_LOGIN_SERVER: ${{ env.ACR_LOGIN_SERVER }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          bash .github/scripts/render_manifests.sh k8s/base rendered
+
+      - name: Deploy to prod
+        run: |
+          kubectl apply -f rendered/
+          kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/product --timeout=180s
+          kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/order   --timeout=180s
+          kubectl -n ${{ env.PROD_NAMESPACE }} rollout status deploy/frontend --timeout=180s
+
+      - name: Post-deploy check
+        run: kubectl -n ${{ env.PROD_NAMESPACE }} get svc -o wide

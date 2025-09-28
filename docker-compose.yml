@@ -1,0 +1,62 @@
+version: "3.9"
+
+# You can set ACR_LOGIN_SERVER to "sit722.azurecr.io" for image names to match your registry.
+# For purely local development, you can ignore the image names and just let Compose build/run.
+
+services:
+  product:
+    build:
+      context: ./backend/product-service
+      dockerfile: Dockerfile
+    image: ${ACR_LOGIN_SERVER:-local}/product:dev
+    container_name: product
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+    networks:
+      - appnet
+
+  order:
+    build:
+      context: ./backend/order-service
+      dockerfile: Dockerfile
+    image: ${ACR_LOGIN_SERVER:-local}/order:dev
+    container_name: order
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+    networks:
+      - appnet
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: ${ACR_LOGIN_SERVER:-local}/frontend:dev
+    container_name: frontend
+    # Map to 8088 on host to avoid clashing with backend ports
+    ports:
+      - "8088:80"
+    depends_on:
+      product:
+        condition: service_healthy
+      order:
+        condition: service_healthy
+    networks:
+      - appnet
+    # If your frontend needs API base URLs at runtime, you can pass env vars here
+    # environment:
+    #   VITE_PRODUCT_API: "http://product:8080"
+    #   VITE_ORDER_API: "http://order:8081"
+
+networks:
+  appnet:
+    driver: bridge

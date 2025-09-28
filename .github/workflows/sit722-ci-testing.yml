@@ -1,0 +1,75 @@
+name: SIT722 CI - Test, Build & Push (testing)
+
+on:
+  push:
+    branches: [ "testing" ]
+  workflow_dispatch:
+
+env:
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+
+jobs:
+  test_build_push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # === Tests (adjust to your stack) ===
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Frontend tests
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test -- --ci
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - name: Product tests
+        working-directory: backend/product-service
+        run: ./mvnw -B -DskipTests=false test
+      - name: Order tests
+        working-directory: backend/order-service
+        run: ./mvnw -B -DskipTests=false test
+
+      # === Azure login (Service Principal JSON) ===
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: ACR login
+        run: az acr login --name $ACR_NAME
+
+      # === Build & Push (only runs if tests passed) ===
+      - name: Build & Push product
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/product-service
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/product:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/product:testing-${{ github.sha }}
+
+      - name: Build & Push order
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/order-service
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/order:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/order:testing-${{ github.sha }}
+
+      - name: Build & Push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/frontend:testing-${{ github.sha }}

@@ -1,0 +1,105 @@
+name: SIT722 CD - Ephemeral Staging
+
+on:
+  workflow_run:
+    workflows: ["SIT722 CI - Test, Build & Push (testing)"]
+    types: [completed]
+
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  AKS_RESOURCE_GROUP: ${{ secrets.AKS_RESOURCE_GROUP }}
+  AKS_CLUSTER_NAME:  ${{ secrets.AKS_CLUSTER_NAME }}
+
+jobs:
+  deploy_staging:
+    if: >
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'testing'
+      }}
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ env.AKS_RESOURCE_GROUP }}
+          cluster-name:  ${{ env.AKS_CLUSTER_NAME }}
+
+      - name: Compute ephemeral namespace
+        id: ns
+        run: |
+          NS=stg-${{ github.run_id }}-${{ github.run_attempt }}
+          NS=$(echo $NS | cut -c1-30)
+          echo "ns=$NS" >> "$GITHUB_OUTPUT"
+          kubectl create namespace $NS
+
+      - name: Render manifests
+        env:
+          NAMESPACE: ${{ steps.ns.outputs.ns }}
+          ACR_LOGIN_SERVER: ${{ env.ACR_LOGIN_SERVER }}
+          IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          bash .github/scripts/render_manifests.sh k8s/base rendered
+
+      - name: Deploy to staging
+        run: |
+          NS=${{ steps.ns.outputs.ns }}
+          kubectl apply -f rendered/
+          kubectl -n $NS rollout status deploy/product --timeout=180s
+          kubectl -n $NS rollout status deploy/order   --timeout=180s
+          kubectl -n $NS rollout status deploy/frontend --timeout=180s
+
+      - name: Show service IPs
+        run: |
+          NS=${{ steps.ns.outputs.ns }}
+          sleep 30
+          kubectl -n $NS get svc -o wide
+
+      - name: Smoke tests
+        run: |
+          NS=${{ steps.ns.outputs.ns }}
+          FIP=$(kubectl -n $NS get svc frontend -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          PIP=$(kubectl -n $NS get svc product  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          OIP=$(kubectl -n $NS get svc order    -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          for url in "http://$FIP/" "http://$PIP/health" "http://$OIP/health"; do
+            echo "Testing $url"
+            for i in {1..10}; do
+              if curl -fsS "$url" >/dev/null; then echo "OK: $url"; break; fi
+              sleep 5
+            done
+          done
+
+  destroy_staging:
+    needs: deploy_staging
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name:  ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Delete ephemeral namespace
+        run: |
+          NS=stg-${{ github.run_id }}-${{ github.run_attempt }}
+          NS=$(echo $NS | cut -c1-30)
+          kubectl delete namespace $NS --ignore-not-found=true
